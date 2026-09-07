@@ -501,19 +501,25 @@ def build_top_nav(active_page="portal"):
         localStorage.setItem('powermesh-theme', next);
         updateThemeButtons(next);
     }}
+    window.toggleTheme = toggleTheme;
+    window.togglePortalTheme = toggleTheme;
     function updateThemeButtons(th){{
-        const btns = document.querySelectorAll('.theme-toggle-btn');
+        const btns = document.querySelectorAll('.theme-toggle-btn, #theme-btn');
         btns.forEach(b => {{
             b.innerHTML = th === 'light' ? '🌙 Dark' : '☀️ Light';
         }});
     }}
-    initTheme();
+    if(document.readyState === 'loading'){{
+        document.addEventListener('DOMContentLoaded', initTheme);
+    }} else {{
+        initTheme();
+    }}
 
     async function triggerDemoScenario(){{
         try{{
             const r = await fetch('/api/demo-scenario', {{method:'POST'}});
             const j = await r.json();
-            alert("Multi-Hazard Disaster Scenario Injected!\n\n• Earthquake: 3 survivors trapped in collapsed structure\n• Cyclone / Grid Failure: Medical clinic backup battery low\n• Flood: River rescue unit deployed\n• 720p Field Reconnaissance Photo received at Command Center");
+            alert("Multi-Hazard Disaster Scenario Injected!\\n\\n• Earthquake: 3 survivors trapped in collapsed structure\\n• Cyclone / Grid Failure: Medical clinic backup battery low\\n• Flood: River rescue unit deployed\\n• 720p Field Reconnaissance Photo received at Command Center");
             if(window.location.pathname === '/admin' || window.location.pathname === '/twin'){{
                 window.location.reload();
             }}
@@ -559,9 +565,16 @@ def get_status():
         "sdOK": hub.sd_ok,
         "ap": hub.ap_ssid,
         "ip": hub.ip,
+        "beacon": hub.beacon_on,
         "beaconMode": hub.beacon_mode,
+        "rfLed": hub.rf_led,
+        "usbLed": hub.usb_led,
         "radioMode": hub.radio_mode,
-        "nodeId": "PM-01"
+        "nodeId": "PM-01",
+        "received_photos": hub.shared_photos,
+        "incidents": hub.incidents,
+        "meshNodes": hub.mesh_nodes,
+        "serialLogs": hub.serial_logs[-35:]
     }
 
 # Multi-Hazard Realistic Disaster Scenario (Earthquake, Cyclone, Flood, Grid Outage)
@@ -655,32 +668,37 @@ def resolve_incident(inc_id: str):
 @app.delete("/api/photos/{photo_id}")
 @app.post("/api/photos/{photo_id}/delete")
 async def delete_photo(photo_id: str):
-    removed = None
-    for i, p in enumerate(hub.shared_photos):
+    removed = []
+    kept = []
+    for p in hub.shared_photos:
         p_id = p.get("img_id")
         fname = os.path.basename(p.get("img_url", ""))
         if p_id == photo_id or fname == photo_id:
-            removed = hub.shared_photos.pop(i)
-            break
+            removed.append(p)
+        else:
+            kept.append(p)
             
     if removed:
-        url = removed.get("img_url", "")
-        if url.startswith("/uploads/"):
-            fname = url.replace("/uploads/", "")
-            fpath = os.path.join(uploads_dir, fname)
-            if os.path.exists(fpath) and "sample_flood_rescue.jpg" not in fname:
-                try:
-                    os.remove(fpath)
-                except Exception:
-                    pass
-        hub.log_serial(f"[IMAGE] Photo {photo_id} deleted from mesh buffer")
-        del_msg = json.dumps({"type": "delete_photo", "img_id": photo_id, "img_url": url})
+        hub.shared_photos = kept
+        for r in removed:
+            url = r.get("img_url", "")
+            if url.startswith("/uploads/"):
+                fname = url.replace("/uploads/", "")
+                fpath = os.path.join(uploads_dir, fname)
+                if os.path.exists(fpath) and "sample_flood_rescue.jpg" not in fname:
+                    try:
+                        os.remove(fpath)
+                    except Exception:
+                        pass
+        hub.log_serial(f"[IMAGE] Photo {photo_id} deleted from mesh buffer ({len(removed)} instances)")
+        del_msg = json.dumps({"type": "delete_photo", "img_id": photo_id})
         for ws in list(connected_websockets):
             try:
                 await ws.send_text(del_msg)
             except Exception:
                 pass
-        return {"status": "ok", "deleted": photo_id}
+        await broadcast_twin_state()
+        return {"status": "ok", "deleted": photo_id, "count": len(removed)}
     return JSONResponse(status_code=404, content={"status": "error", "message": "Photo not found"})
 
 # Captive Portal detection probes
@@ -696,6 +714,93 @@ def captive_redirect():
 @app.get("/success.txt")
 def captive_success():
     return HTMLResponse(content="", status_code=200)
+
+def process_img_chunk(parsed: dict) -> Optional[dict]:
+    img_id = parsed.get("img_id", "img_default")
+    seq = int(parsed.get("seq", 0))
+    total = int(parsed.get("total", 1))
+    chunk_data = parsed.get("data", "")
+    sender_name = parsed.get("sender_name", "Citizen")
+
+    if img_id not in hub.image_store:
+        hub.image_store[img_id] = {
+            "total": total,
+            "chunks": {},
+            "sender": sender_name,
+            "started": time.time()
+        }
+    hub.image_store[img_id]["chunks"][seq] = chunk_data
+    received_len = len(hub.image_store[img_id]["chunks"])
+
+    if received_len % 10 == 0 or received_len == total:
+        hub.log_serial(f"[RF RX] Reassembling photo {img_id}: frame {received_len}/{total}")
+
+    # If all chunks arrived, reconstruct image!
+    if received_len >= total:
+        full_b64 = "".join(hub.image_store[img_id]["chunks"][i] for i in range(total) if i in hub.image_store[img_id]["chunks"])
+        filename = f"photo_{int(time.time()*1000)}.jpg"
+        filepath = os.path.join(uploads_dir, filename)
+        raw_b64 = full_b64.split(",", 1)[1] if "," in full_b64 else full_b64
+        try:
+            with open(filepath, "wb") as img_f:
+                img_f.write(base64.b64decode(raw_b64))
+            img_url = f"/uploads/{filename}"
+        except Exception:
+            img_url = full_b64
+        
+        photo_msg = {
+            "type": "image",
+            "img_id": img_id,
+            "from": "PM-01",
+            "sender_name": sender_name,
+            "img_url": img_url,
+            "data_url": full_b64,
+            "caption": "Disaster Scene Photo (720p Mesh Transmitted)",
+            "time": time.strftime("%H:%M"),
+            "ts": time.time()
+        }
+        hub.shared_photos.insert(0, photo_msg)
+        hub.log_serial(f"[IMAGE] Photo {img_id} fully reassembled ({total} frames)! Stored at {img_url}")
+
+        hub.rf_send(json.dumps(photo_msg))
+        if img_id in hub.image_store:
+            del hub.image_store[img_id]
+        return photo_msg
+    return None
+
+@app.post("/api/upload-photo-chunk")
+async def api_upload_photo_chunk(req: dict):
+    photo_msg = process_img_chunk(req)
+    if photo_msg:
+        broadcast_payload = json.dumps(photo_msg)
+        for ws_client in list(connected_websockets):
+            try:
+                await ws_client.send_text(broadcast_payload)
+            except Exception:
+                pass
+        await broadcast_twin_state()
+        return {"status": "ok", "assembled": True, "photo": photo_msg}
+    img_id = req.get("img_id", "")
+    received = len(hub.image_store[img_id]["chunks"]) if img_id in hub.image_store else 0
+    total = int(req.get("total", 1))
+    return {"status": "ok", "assembled": False, "received": received, "total": total}
+
+@app.post("/api/packet")
+async def api_send_packet(req: dict):
+    p_type = req.get("type", "")
+    if p_type == "img_chunk":
+        photo_msg = process_img_chunk(req)
+        return {"status": "ok", "assembled": bool(photo_msg)}
+    raw = json.dumps(req)
+    out_msg = hub.rf_send(raw)
+    hub.log_serial(f"[HTTP RX] {raw[:120]}")
+    for ws in list(connected_websockets):
+        try:
+            await ws.send_text(out_msg)
+        except Exception:
+            pass
+    await broadcast_twin_state()
+    return {"status": "ok", "out": out_msg}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -716,64 +821,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 parsed = None
 
             if parsed and parsed.get("type") == "img_chunk":
-                img_id = parsed.get("img_id", "img_default")
-                seq = int(parsed.get("seq", 0))
-                total = int(parsed.get("total", 1))
-                chunk_data = parsed.get("data", "")
-                sender_name = parsed.get("sender_name", "Citizen")
-
-                if img_id not in hub.image_store:
-                    hub.image_store[img_id] = {
-                        "total": total,
-                        "chunks": {},
-                        "sender": sender_name,
-                        "started": time.time()
-                    }
-                hub.image_store[img_id]["chunks"][seq] = chunk_data
-                received_len = len(hub.image_store[img_id]["chunks"])
-
-                if received_len % 10 == 0 or received_len == total:
-                    hub.log_serial(f"[RF RX] Reassembling photo {img_id}: frame {received_len}/{total}")
-
-                # If all chunks arrived, reconstruct image!
-                if received_len >= total:
-                    full_b64 = "".join(hub.image_store[img_id]["chunks"][i] for i in range(total) if i in hub.image_store[img_id]["chunks"])
-                    filename = f"photo_{int(time.time()*1000)}.jpg"
-                    filepath = os.path.join(uploads_dir, filename)
-                    raw_b64 = full_b64.split(",", 1)[1] if "," in full_b64 else full_b64
-                    try:
-                        with open(filepath, "wb") as img_f:
-                            img_f.write(base64.b64decode(raw_b64))
-                        img_url = f"/uploads/{filename}"
-                    except Exception as e:
-                        img_url = full_b64
-                    
-                    photo_msg = {
-                        "type": "image",
-                        "img_id": img_id,
-                        "from": "PM-01",
-                        "sender_name": sender_name,
-                        "img_url": img_url,
-                        "data_url": full_b64,
-                        "caption": "Disaster Scene Photo (720p Mesh Transmitted)",
-                        "time": time.strftime("%H:%M"),
-                        "ts": time.time()
-                    }
-                    hub.shared_photos.insert(0, photo_msg)
-                    hub.log_serial(f"[IMAGE] Photo {img_id} fully reassembled ({total} frames)! Stored at {img_url}")
-
-                    # Broadcast assembled photo to all portal users
-                    broadcast_payload = hub.rf_send(json.dumps(photo_msg))
+                photo_msg = process_img_chunk(parsed)
+                if photo_msg:
+                    broadcast_payload = json.dumps(photo_msg)
                     for ws_client in list(connected_websockets):
                         try:
                             await ws_client.send_text(broadcast_payload)
                         except Exception:
                             pass
-                    
-                    # Clean up buffer
-                    if img_id in hub.image_store:
-                        del hub.image_store[img_id]
-
             else:
                 hub.log_serial(f"[WS RX] {data[:120]}")
                 out_msg = hub.rf_send(data)
@@ -788,8 +843,8 @@ async def websocket_endpoint(websocket: WebSocket):
             hub.rf_led = False
             await broadcast_twin_state()
             
-    except WebSocketDisconnect:
-        connected_websockets.remove(websocket)
+    except (WebSocketDisconnect, RuntimeError):
+        connected_websockets.discard(websocket)
         if hub.peers > 0:
             hub.peers -= 1
         hub.log_serial(f"[WS] survivor client disconnected (peers={hub.peers})")
@@ -821,6 +876,7 @@ async def twin_ws_endpoint(websocket: WebSocket):
                         await ws.send_text(out_msg)
                     except Exception:
                         pass
+                hub.rf_led = True
                 await broadcast_twin_state()
                 await asyncio.sleep(0.06)
                 hub.rf_led = False
@@ -842,16 +898,19 @@ async def twin_ws_endpoint(websocket: WebSocket):
                 hub.rx += 1
                 from_n = msg.get("from", "PM-02")
                 hub.log_serial(f"[RF RX] SA618 packet from {from_n}: {raw}")
-                with open(hub.log_file, "a", encoding="utf-8") as f:
-                    f.write(f"{int(time.time()*1000)} RX {from_n} {raw}\n")
+                try:
+                    with open(hub.log_file, "a", encoding="utf-8") as f:
+                        f.write(f"{int(time.time()*1000)} RX {from_n} {raw}\n")
+                except Exception:
+                    pass
                 for ws in list(connected_websockets):
                     try:
                         await ws.send_text(raw)
                     except Exception:
                         pass
                 await broadcast_twin_state()
-    except WebSocketDisconnect:
-        twin_websockets.remove(websocket)
+    except (WebSocketDisconnect, RuntimeError):
+        twin_websockets.discard(websocket)
 
 def get_twin_state():
     return {
@@ -882,6 +941,65 @@ async def broadcast_twin_state():
             await ws.send_json(ts)
         except Exception:
             pass
+
+@app.get("/api/twin/state")
+def api_twin_state():
+    return get_twin_state()
+
+@app.post("/api/twin/action")
+async def api_twin_action(req: dict):
+    action = req.get("action")
+    if action == "press_sos":
+        hub.log_serial("[BTN] SOS hardware pushbutton pressed (GPIO 10)!")
+        sos_payload = json.dumps({
+            "type": "Immediate (Red)",
+            "count": "Hardware Emergency Signal",
+            "msg": "Physical SOS pushbutton triggered on Node PM-01",
+            "held": 320,
+            "lat": 26.1445,
+            "lon": 91.6022
+        })
+        out_msg = hub.rf_send(sos_payload)
+        for ws in list(connected_websockets):
+            try:
+                await ws.send_text(out_msg)
+            except Exception:
+                pass
+        hub.rf_led = True
+        await broadcast_twin_state()
+        await asyncio.sleep(0.06)
+        hub.rf_led = False
+        await broadcast_twin_state()
+    elif action == "set_battery":
+        val = float(req.get("value", 1.0))
+        hub.read_battery(val)
+        hub.log_serial(f"[ADC] Battery pot adjusted: {hub.batt_v}V ({hub.batt_pct}%)")
+        await broadcast_twin_state()
+    elif action == "set_beacon":
+        hub.beacon_mode = req.get("mode", "1hz")
+        hub.log_serial(f"[BEACON] Mode changed to: {hub.beacon_mode}")
+        await broadcast_twin_state()
+    elif action == "set_radio":
+        hub.radio_mode = req.get("mode", "dual")
+        hub.log_serial(f"[RADIO] Switch mode: {hub.radio_mode}")
+        await broadcast_twin_state()
+    elif action == "inject_rf":
+        raw = req.get("payload", "Hello mesh")
+        hub.rx += 1
+        from_n = req.get("from", "PM-02")
+        hub.log_serial(f"[RF RX] SA618 packet from {from_n}: {raw}")
+        try:
+            with open(hub.log_file, "a", encoding="utf-8") as f:
+                f.write(f"{int(time.time()*1000)} RX {from_n} {raw}\n")
+        except Exception:
+            pass
+        for ws in list(connected_websockets):
+            try:
+                await ws.send_text(raw)
+            except Exception:
+                pass
+        await broadcast_twin_state()
+    return {"status": "ok", "state": get_twin_state()}
 
 # ====================================================================
 # INCIDENT COMMAND & MESH NETWORK PAGE (/admin)
@@ -1703,76 +1821,168 @@ def get_twin():
 
     <script>
         let ws;
+        let localBeaconMode = "1hz";
+        let morseStep = 0;
+        const morseSos = [1,0,1,0,1,0,0,1,1,0,1,1,0,1,1,0,0,1,0,1,0,1,0,0,0,0];
+
+        // 1. Continuous client-side Search & Rescue Beacon LED blinking loop
+        setInterval(() => {{
+            const b = document.getElementById('led-beacon');
+            const dot = document.getElementById('oled-dot');
+            if(!b) return;
+            if(localBeaconMode === '1hz'){{
+                const act = b.classList.toggle('active');
+                if(dot) dot.style.display = act ? 'block' : 'none';
+            }} else if(localBeaconMode === 'torch'){{
+                b.classList.add('active');
+                if(dot) dot.style.display = 'block';
+            }} else if(localBeaconMode === 'morse_sos'){{
+                const on = morseSos[morseStep % morseSos.length] === 1;
+                morseStep++;
+                if(on) b.classList.add('active'); else b.classList.remove('active');
+                if(dot) dot.style.display = on ? 'block' : 'none';
+            }} else {{
+                b.classList.remove('active');
+                if(dot) dot.style.display = 'none';
+            }}
+        }}, 480);
+
+        // 2. Twin WebSocket & Polling Fallback
         function connect(){{
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(proto + '//' + location.host + '/twin/ws');
-            ws.onopen = () => {{
-                document.getElementById('conn-badge').textContent = 'CONNECTED';
-                document.getElementById('conn-badge').style.color = 'var(--green)';
-            }};
-            ws.onmessage = (e) => {{
-                try {{
-                    const data = JSON.parse(e.data);
-                    updateUI(data);
-                }} catch(err) {{ console.error(err); }}
-            }};
-            ws.onclose = () => {{
-                document.getElementById('conn-badge').textContent = 'RECONNECTING...';
-                document.getElementById('conn-badge').style.color = 'var(--amber)';
-                setTimeout(connect, 1200);
-            }};
+            try {{
+                ws = new WebSocket(proto + '//' + location.host + '/twin/ws');
+                ws.onopen = () => {{
+                    document.getElementById('conn-badge').textContent = 'WEBSOCKET ACTIVE';
+                    document.getElementById('conn-badge').style.color = 'var(--green)';
+                }};
+                ws.onmessage = (e) => {{
+                    try {{
+                        const data = JSON.parse(e.data);
+                        updateUI(data);
+                    }} catch(err) {{ console.error(err); }}
+                }};
+                ws.onclose = () => {{
+                    document.getElementById('conn-badge').textContent = 'CLOUD LIVE MESH';
+                    document.getElementById('conn-badge').style.color = '#0284c7';
+                    setTimeout(connect, 3000);
+                }};
+                ws.onerror = () => {{
+                    document.getElementById('conn-badge').textContent = 'CLOUD LIVE MESH';
+                    document.getElementById('conn-badge').style.color = '#0284c7';
+                }};
+            }} catch(e) {{
+                document.getElementById('conn-badge').textContent = 'CLOUD LIVE MESH';
+                document.getElementById('conn-badge').style.color = '#0284c7';
+            }}
         }}
         connect();
 
+        // 3. Fallback polling for serverless / cloud environments
+        async function fetchState(){{
+            try {{
+                const r = await fetch('/api/twin/state');
+                if(r.ok){{
+                    const data = await r.json();
+                    updateUI(data);
+                }}
+            }} catch(e) {{}}
+        }}
+        fetchState();
+        setInterval(() => {{
+            if(!ws || ws.readyState !== WebSocket.OPEN){{
+                fetchState();
+            }}
+        }}, 1400);
+
         function updateUI(s){{
+            if(!s) return;
             document.getElementById('oled-l1').textContent = `PowerMesh ${{String(s.battPct).padStart(3,' ')}}% ${{s.battV.toFixed(2)}}V`;
             document.getElementById('oled-l2').textContent = `RSSI ${{s.rssi}} dBm  P:${{s.peers}}`;
             document.getElementById('oled-l3').textContent = `TX:${{s.tx}} RX:${{s.rx}} DR:${{s.dropped}}`;
             document.getElementById('oled-l4').textContent = `SD:${{s.sdOK ? 'OK' : 'NO'}} Q:${{s.sdBuffered}}`;
             document.getElementById('oled-l5').textContent = `SEQ:${{s.seq}}  ${{s.peers ? 'STA linked' : 'AP ready'}}`;
             document.getElementById('oled-batt').style.width = `${{s.battPct}}%`;
-            document.getElementById('oled-dot').style.display = s.beacon ? 'block' : 'none';
 
-            const b = document.getElementById('led-beacon');
-            if(s.beacon) b.classList.add('active'); else b.classList.remove('active');
+            if(s.beaconMode) {{
+                localBeaconMode = s.beaconMode;
+                const sel = document.getElementById('beacon-select');
+                if(sel && sel.value !== s.beaconMode) sel.value = s.beaconMode;
+            }}
 
             const r = document.getElementById('led-rf');
-            if(s.rfLed) r.classList.add('active'); else r.classList.remove('active');
+            if(r) {{
+                if(s.rfLed) r.classList.add('active'); else r.classList.remove('active');
+            }}
 
             const consoleBox = document.getElementById('serial-log');
-            if(s.serialLogs && s.serialLogs.length){{
-                consoleBox.textContent = s.serialLogs.join('\n');
+            if(consoleBox && s.serialLogs && s.serialLogs.length){{
+                consoleBox.textContent = s.serialLogs.join('\\n');
                 consoleBox.scrollTop = consoleBox.scrollHeight;
             }}
 
-            document.getElementById('node-summary').textContent = `SEQ: ${{s.seq}} &bull; TX: ${{s.tx}} &bull; RX: ${{s.rx}} &bull; PEERS: ${{s.peers}}`;
+            const sum = document.getElementById('node-summary');
+            if(sum) sum.innerHTML = `SEQ: ${{s.seq}} &bull; TX: ${{s.tx}} &bull; RX: ${{s.rx}} &bull; PEERS: ${{s.peers}}`;
+        }}
+
+        async function sendAction(data){{
+            if(ws && ws.readyState === WebSocket.OPEN){{
+                ws.send(JSON.stringify(data));
+            }} else {{
+                try {{
+                    const r = await fetch('/api/twin/action', {{
+                        method: 'POST',
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: JSON.stringify(data)
+                    }});
+                    if(r.ok){{
+                        const j = await r.json();
+                        if(j.state) updateUI(j.state);
+                    }}
+                }} catch(e) {{}}
+            }}
         }}
 
         function pressSOS(){{
-            if(ws && ws.readyState === WebSocket.OPEN){{
-                ws.send(JSON.stringify({{action: 'press_sos'}}));
+            const r = document.getElementById('led-rf');
+            if(r){{
+                r.classList.add('active');
+                setTimeout(() => r.classList.remove('active'), 250);
             }}
+            const consoleBox = document.getElementById('serial-log');
+            if(consoleBox){{
+                consoleBox.textContent += "\\n[" + new Date().toLocaleTimeString() + "] [BTN] Physical SOS pushbutton pressed (GPIO 10)";
+                consoleBox.scrollTop = consoleBox.scrollHeight;
+            }}
+            sendAction({{action: 'press_sos'}});
         }}
 
         function changeBattery(val){{
             const v = 9.0 + parseFloat(val) * 3.6;
             const pct = Math.round(parseFloat(val) * 100);
             document.getElementById('batt-text').textContent = `${{v.toFixed(2)}}V (${{pct}}%)`;
-            if(ws && ws.readyState === WebSocket.OPEN){{
-                ws.send(JSON.stringify({{action: 'set_battery', value: parseFloat(val)}}));
-            }}
+            document.getElementById('oled-l1').textContent = `PowerMesh ${{String(pct).padStart(3,' ')}}% ${{v.toFixed(2)}}V`;
+            document.getElementById('oled-batt').style.width = `${{pct}}%`;
+            sendAction({{action: 'set_battery', value: parseFloat(val)}});
         }}
 
         function changeBeacon(val){{
-            if(ws && ws.readyState === WebSocket.OPEN){{
-                ws.send(JSON.stringify({{action: 'set_beacon', mode: val}}));
+            localBeaconMode = val;
+            const consoleBox = document.getElementById('serial-log');
+            if(consoleBox){{
+                consoleBox.textContent += "\\n[" + new Date().toLocaleTimeString() + "] [BEACON] Mode changed to: " + val;
+                consoleBox.scrollTop = consoleBox.scrollHeight;
             }}
+            sendAction({{action: 'set_beacon', mode: val}});
         }}
 
         function changeRadio(val){{
-            if(ws && ws.readyState === WebSocket.OPEN){{
-                ws.send(JSON.stringify({{action: 'set_radio', mode: val}}));
+            const consoleBox = document.getElementById('serial-log');
+            if(consoleBox){{
+                consoleBox.textContent += "\\n[" + new Date().toLocaleTimeString() + "] [RADIO] Mode switched to: " + val;
+                consoleBox.scrollTop = consoleBox.scrollHeight;
             }}
+            sendAction({{action: 'set_radio', mode: val}});
         }}
 
         function injectRF(){{
@@ -1780,10 +1990,18 @@ def get_twin():
             const sender = document.getElementById('rf-sender').value;
             const txt = inp.value.trim();
             if(!txt) return;
-            if(ws && ws.readyState === WebSocket.OPEN){{
-                ws.send(JSON.stringify({{action: 'inject_rf', from: sender, payload: txt}}));
-                inp.value = '';
+            const consoleBox = document.getElementById('serial-log');
+            if(consoleBox){{
+                consoleBox.textContent += "\\n[" + new Date().toLocaleTimeString() + "] [RF RX] SA618 packet from " + sender + ": " + txt;
+                consoleBox.scrollTop = consoleBox.scrollHeight;
             }}
+            const r = document.getElementById('led-rf');
+            if(r){{
+                r.classList.add('active');
+                setTimeout(() => r.classList.remove('active'), 250);
+            }}
+            inp.value = '';
+            sendAction({{action: 'inject_rf', from: sender, payload: txt}});
         }}
     </script>
 </body>

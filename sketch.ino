@@ -836,12 +836,16 @@ function initPortalTheme(){
 initPortalTheme();
 
 function togglePortalTheme(){
-  const current = document.documentElement.getAttribute('data-theme') || 'light';
-  const next = current === 'light' ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', next);
-  localStorage.setItem('powermesh-theme', next);
-  const btn = document.getElementById('theme-btn');
-  if(btn) btn.innerHTML = next === 'light' ? '🌙 Dark' : '☀️ Light';
+  if(window.toggleTheme){
+    window.toggleTheme();
+  } else {
+    const current = document.documentElement.getAttribute('data-theme') || 'light';
+    const next = current === 'light' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('powermesh-theme', next);
+    const btn = document.getElementById('theme-btn');
+    if(btn) btn.innerHTML = next === 'light' ? '🌙 Dark' : '☀️ Light';
+  }
 }
 
 function pickCrisis(type, detail, elementId){
@@ -988,18 +992,26 @@ function sendChat(){
   const txt = inp.value.trim();
   if(!txt) return;
 
+  const timeStr = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
   const payload = {
     type: "chat",
     sender_name: "Survivor",
     msg: txt,
-    time: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}),
+    time: timeStr,
     ts: Date.now()
   };
 
+  addMsgBubble(txt, true, "You", timeStr);
+  inp.value = "";
+
   if(ws && ws.readyState === WebSocket.OPEN){
     ws.send(JSON.stringify(payload));
-    addMsgBubble(txt, true, "You", payload.time);
-    inp.value = "";
+  } else {
+    fetch('/api/packet', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    }).catch(()=>{});
   }
 }
 
@@ -1055,14 +1067,25 @@ async function dispatchPhoto(){
 
   for(let i=0; i<compressedDataUrl.length; i+=chunk){
     const seq = Math.floor(i / chunk);
-    ws.send(JSON.stringify({
+    const chunkPayload = {
       type: "img_chunk",
       img_id: imgId,
       seq: seq,
       total: total,
       data: compressedDataUrl.slice(i, i + chunk),
       sender_name: "Survivor"
-    }));
+    };
+    if(ws && ws.readyState === WebSocket.OPEN){
+      ws.send(JSON.stringify(chunkPayload));
+    } else {
+      try {
+        await fetch('/api/upload-photo-chunk', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(chunkPayload)
+        });
+      } catch(e) {}
+    }
     const pct = Math.round(((seq + 1) / total) * 100);
     bar.style.width = `${pct}%`;
     await new Promise(r => setTimeout(r, 15));
@@ -1108,10 +1131,17 @@ function sendSOS(){
     ts: Date.now()
   };
 
+  addAlertCard(payload, "Sent Just Now");
+
   if(ws && ws.readyState === WebSocket.OPEN){
     ws.send(JSON.stringify(payload));
+  } else {
+    fetch('/api/packet', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    }).catch(()=>{});
   }
-  addAlertCard(payload, "Sent Just Now");
   alert("🚨 Emergency Call Sent!\n\nRescue teams and nearby boats have received your alert and GPS coordinates.");
 }
 
@@ -1142,7 +1172,15 @@ function toggleSiren(){
 setInterval(async()=>{
   try{
     const r = await fetch('/status'); const j = await r.json();
-    document.getElementById('batt').textContent = `🔋 ${j.battPct}%`;
+    if(j.battPct !== undefined) document.getElementById('batt').textContent = `🔋 ${j.battPct}%`;
+    if(j.received_photos && j.received_photos.length){
+      j.received_photos.forEach(p => {
+        const id = p.img_id || ('img_' + (p.time || 'recon'));
+        if(!document.getElementById(`chat-photo-${id}`)){
+          addPhotoBubble(p.img_url || p.data_url, false, p.sender_name || 'Field Recon', p.caption, p.time, id);
+        }
+      });
+    }
   }catch{}
 }, 2000);
 </script>

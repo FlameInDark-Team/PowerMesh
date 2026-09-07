@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "author": "Tech Yoddhas - PowerMesh",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-s3-devkitc-1",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {
+        "flashSize": "16",
+        "psramSize": "8",
+        "psramType": "octal"
+      }
+    },
+    {
+      "type": "board-ssd1306",
+      "id": "oled",
+      "top": 120,
+      "left": 190,
+      "attrs": {
+        "i2cAddress": "0x3c"
+      }
+    },
+    {
+      "type": "wokwi-microsd-card",
+      "id": "sd",
+      "top": -38.17,
+      "left": -220.73,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-potentiometer",
+      "id": "bat",
+      "top": -116.5,
+      "left": -221,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-led",
+      "id": "beacon",
+      "top": -45,
+      "left": 230,
+      "attrs": {
+        "color": "white",
+        "label": "3W Beacon"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "charge",
+      "top": -5,
+      "left": 230,
+      "attrs": {
+        "color": "green",
+        "label": "USB 5V"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "rssi_led",
+      "top": 35,
+      "left": 230,
+      "attrs": {
+        "color": "blue",
+        "label": "RF TX"
+      }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_sos",
+      "top": 73.4,
+      "left": -115.2,
+      "attrs": {
+        "color": "red",
+        "label": "SOS"
+      }
+    }
+  ],
+  "connections": [
+    [
+      "esp:8",
+      "oled:SDA",
+      "green",
+      []
+    ],
+    [
+      "esp:9",
+      "oled:SCL",
+      "green",
+      []
+    ],
+    [
+      "oled:VCC",
+      "esp:3V3.1",
+      "red",
+      []
+    ],
+    [
+      "oled:GND",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "sd:VCC",
+      "esp:3V3.1",
+      "red",
+      [
+        "h-10",
+        "v-20"
+      ]
+    ],
+    [
+      "sd:GND",
+      "esp:GND.1",
+      "black",
+      [
+        "h-10",
+        "v-10"
+      ]
+    ],
+    [
+      "sd:SCK",
+      "esp:14",
+      "violet",
+      []
+    ],
+    [
+      "sd:DI",
+      "esp:13",
+      "orange",
+      []
+    ],
+    [
+      "sd:DO",
+      "esp:12",
+      "green",
+      []
+    ],
+    [
+      "sd:CS",
+      "esp:15",
+      "blue",
+      []
+    ],
+    [
+      "bat:GND",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "bat:VCC",
+      "esp:3V3.1",
+      "red",
+      []
+    ],
+    [
+      "bat:SIG",
+      "esp:1",
+      "gold",
+      []
+    ],
+    [
+      "esp:2",
+      "beacon:A",
+      "red",
+      []
+    ],
+    [
+      "beacon:C",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "esp:5",
+      "charge:A",
+      "red",
+      []
+    ],
+    [
+      "charge:C",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "esp:6",
+      "rssi_led:A",
+      "red",
+      []
+    ],
+    [
+      "rssi_led:C",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "btn_sos:1.l",
+      "esp:GND.1",
+      "black",
+      []
+    ],
+    [
+      "btn_sos:2.r",
+      "esp:10",
+      "orange",
+      []
+    ],
+    [
+      "esp:TX",
+      "$serialMonitor:RX",
+      "",
+      []
+    ],
+    [
+      "esp:RX",
+      "$serialMonitor:TX",
+      "",
+      []
+    ]
+  ],
+  "serialMonitor": {
+    "display": "terminal",
+    "newline": "lf"
+  },
+  "dependencies": {}
+}

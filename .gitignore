@@ -1,0 +1,21 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.bak
+*.log
+queue.log
+
+# Temporary test uploads
+uploads/photo_*
+!uploads/sample_flood_rescue.jpg
+
+# Vercel & Node
+.vercel/
+node_modules/
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
